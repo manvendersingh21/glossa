@@ -2,11 +2,14 @@
  *
  * This module deliberately has no clock, network, database, or framework
  * dependencies. Callers may pass a fixed `now` so recommendations are
- * reproducible in tests and demos.
+ * reproducible in tests and demos. It combines Google's traffic-aware delay
+ * with a modeled signal delay (and its uncertainty range) and selects the
+ * candidate with the lowest expected total delay.
  */
 
 export type DateLike = string | Date;
 export type SecondsRange = readonly [number, number];
+export type Confidence = "low" | "medium" | "high";
 
 export interface DepartureWindow {
   /** Inclusive start. Defaults to `now` (or the current instant). */
@@ -20,25 +23,46 @@ export interface DepartureWindow {
 export interface CandidateDepartureOptions {
   now?: DateLike;
   window?: DepartureWindow;
+  /** Minutes between candidates. Defaults to 15. */
   intervalMinutes?: number;
-  /** When true, include the exact window start even if it is off the interval. */
+  /** When true, include the exact window start even if it is off the interval. Defaults to true. */
   includeStart?: boolean;
 }
 
+/** A single departure candidate's delay inputs.
+ *
+ * Traffic delay is the Google-modeled delay (duration minus free-flow). The
+ * modeled signal delay and likely stops carry uncertainty ranges from the
+ * signal model; the optimizer preserves those ranges in its output.
+ */
 export interface RouteOutcome {
   departureTime: DateLike;
   trafficDelaySeconds: number;
   modeledSignalDelaySeconds: number | SecondsRange;
   likelySignalStops?: number | SecondsRange;
+  /** Authoritative confidence for the modeled signal portion (e.g. from the
+   * signal model or route estimate). When omitted the confidence is derived
+   * from the width of the modeled delay range. */
+  confidence?: Confidence;
 }
 
+/** A scored, UTC-normalized, deterministic view of a single candidate. */
 export interface ScoredRouteOutcome {
+  /** Timezone-safe UTC ISO timestamp of the candidate departure. */
   departureTime: string;
   trafficDelaySeconds: number;
   modeledSignalDelaySeconds: SecondsRange;
   likelySignalStops: SecondsRange | null;
+  /** Expected (mean) number of signal stops, or null when none were supplied. */
+  expectedSignalStops: number | null;
+  /** Expected total delay in seconds (traffic + mean modeled signal). Lower is better. */
   scoreSeconds: number;
+  /** Preserved uncertainty range for the total delay. */
   scoreRangeSeconds: SecondsRange;
+  /** Confidence in the modeled signal portion of the score. */
+  confidence: Confidence;
+  /** Deterministic, human-readable explanation of this candidate's score. */
+  explanation: string;
 }
 
 export interface DepartureRecommendationOptions extends CandidateDepartureOptions {
@@ -48,7 +72,9 @@ export interface DepartureRecommendationOptions extends CandidateDepartureOption
 export interface DepartureRecommendation {
   candidates: string[];
   scoredOutcomes: ScoredRouteOutcome[];
+  /** Best candidate, or null when no outcomes matched the generated candidates. */
   recommendation: ScoredRouteOutcome | null;
+  /** Comparison-level explanation for the chosen (or missing) recommendation. */
   uncertaintyExplanation: string;
 }
 
@@ -67,7 +93,7 @@ function nonNegative(value: number, label: string): number {
   return value;
 }
 
-function range(value: number | SecondsRange, label: string): SecondsRange {
+function asRange(value: number | SecondsRange, label: string): SecondsRange {
   if (typeof value === "number") {
     const seconds = nonNegative(value, label);
     return [seconds, seconds];
@@ -79,7 +105,53 @@ function range(value: number | SecondsRange, label: string): SecondsRange {
   return [minimum, maximum];
 }
 
-/** Generate inclusive, UTC-normalized candidate instants at a fixed interval. */
+function meanOf(range: SecondsRange): number {
+  return Number(((range[0] + range[1]) / 2).toFixed(2));
+}
+
+/** Derive confidence from how wide the modeled signal range is relative to the
+ * expected total delay. A narrow range relative to the total reads as "high";
+ * a range about as wide as the total reads as "low". */
+function deriveConfidence(signal: SecondsRange, traffic: number): Confidence {
+  const signalWidth = signal[1] - signal[0];
+  const expectedTotal = traffic + (signal[0] + signal[1]) / 2;
+  if (expectedTotal <= 0) return "high";
+  const relativeUncertainty = signalWidth / 2 / expectedTotal;
+  if (relativeUncertainty < 0.15) return "high";
+  if (relativeUncertainty < 0.35) return "medium";
+  return "low";
+}
+
+function roundSeconds(value: number): number {
+  return Math.round(value);
+}
+
+function explainOutcome(scored: ScoredRouteOutcome): string {
+  const signal = `${roundSeconds(scored.modeledSignalDelaySeconds[0])}-${roundSeconds(scored.modeledSignalDelaySeconds[1])}s`;
+  const total = `${roundSeconds(scored.scoreRangeSeconds[0])}-${roundSeconds(scored.scoreRangeSeconds[1])}s`;
+  const stops = scored.likelySignalStops
+    ? ` Expected ${scored.expectedSignalStops} signal stops (range ${scored.likelySignalStops[0]}-${scored.likelySignalStops[1]}).`
+    : "";
+  return [
+    `Departing at ${scored.departureTime} expects ~${roundSeconds(scored.scoreSeconds)}s of delay`,
+    `(traffic ${roundSeconds(scored.trafficDelaySeconds)}s + modeled signal ${signal})`,
+    `with a total delay range of ${total} at ${scored.confidence} confidence.`,
+  ].join(" ") + stops;
+}
+
+function explainRecommendation(recommendation: ScoredRouteOutcome | null): string {
+  if (!recommendation) return "No route outcomes were supplied for the generated departure candidates.";
+  return [
+    `Best departure is ${recommendation.departureTime}: expect ~${roundSeconds(recommendation.scoreSeconds)}s of delay`,
+    `(range ${roundSeconds(recommendation.scoreRangeSeconds[0])}-${roundSeconds(recommendation.scoreRangeSeconds[1])}s,`,
+    `${recommendation.confidence} confidence).`,
+    "Traffic and signal behavior can vary with detection, transit priority, and live timing changes.",
+  ].join(" ");
+}
+
+/** Generate inclusive, UTC-normalized candidate instants at a fixed interval.
+ *
+ * With the defaults this yields `now`, `+15`, `+30`, `+45`, and `+60` minutes. */
 export function generateCandidateDepartureTimes(options: CandidateDepartureOptions = {}): string[] {
   const now = asDate(options.now ?? new Date(), "now");
   const start = asDate(options.window?.start ?? now, "window start");
@@ -102,34 +174,49 @@ export function generateCandidateDepartureTimes(options: CandidateDepartureOptio
 export function scoreRouteOutcome(outcome: RouteOutcome): ScoredRouteOutcome {
   const departureTime = iso(outcome.departureTime, "departureTime");
   const traffic = nonNegative(outcome.trafficDelaySeconds, "trafficDelaySeconds");
-  const signal = range(outcome.modeledSignalDelaySeconds, "modeledSignalDelaySeconds");
-  const stops = outcome.likelySignalStops === undefined ? null : range(outcome.likelySignalStops, "likelySignalStops");
-  return {
+  const signal = asRange(outcome.modeledSignalDelaySeconds, "modeledSignalDelaySeconds");
+  const stops = outcome.likelySignalStops === undefined ? null : asRange(outcome.likelySignalStops, "likelySignalStops");
+  const confidence = outcome.confidence ?? deriveConfidence(signal, traffic);
+  const scored: ScoredRouteOutcome = {
     departureTime,
     trafficDelaySeconds: traffic,
     modeledSignalDelaySeconds: signal,
     likelySignalStops: stops,
+    expectedSignalStops: stops ? meanOf(stops) : null,
     // The optimization objective is expected traffic delay plus expected signal delay.
     scoreSeconds: traffic + (signal[0] + signal[1]) / 2,
     scoreRangeSeconds: [traffic + signal[0], traffic + signal[1]],
+    confidence,
+    explanation: "",
   };
+  scored.explanation = explainOutcome(scored);
+  return scored;
 }
 
-/** Score supplied route results and choose the lowest expected delay. */
+/** Score supplied route results and choose the lowest expected delay.
+ *
+ * `scoredOutcomes` is returned as a ranked list: best (lowest expected delay)
+ * first, then the remaining alternatives in ascending score order. Ties on
+ * the score are broken deterministically by the earliest departure time
+ * (lexicographic UTC ISO comparison), independent of the input order. The
+ * `recommendation` is the first element of that ranked list (or null when no
+ * outcomes matched the generated candidates). */
 export function recommendDeparture(options: DepartureRecommendationOptions): DepartureRecommendation {
   const candidates = generateCandidateDepartureTimes(options);
   const byTime = new Map(options.outcomes.map((outcome) => [iso(outcome.departureTime, "departureTime"), scoreRouteOutcome(outcome)]));
-  const scoredOutcomes = candidates.flatMap((candidate) => {
+  const matched = candidates.flatMap((candidate) => {
     const outcome = byTime.get(candidate);
     return outcome ? [outcome] : [];
   });
-  const recommendation = scoredOutcomes.reduce<ScoredRouteOutcome | null>((best, current) => {
-    if (!best || current.scoreSeconds < best.scoreSeconds ||
-      (current.scoreSeconds === best.scoreSeconds && current.departureTime < best.departureTime)) return current;
-    return best;
-  }, null);
-  const uncertaintyExplanation = recommendation
-    ? `Expected delay is ${Math.round(recommendation.scoreSeconds)} seconds; modeled bounds are ${Math.round(recommendation.scoreRangeSeconds[0])}-${Math.round(recommendation.scoreRangeSeconds[1])} seconds. Traffic and signal behavior can vary with detection, transit priority, and live timing changes.`
-    : "No route outcomes were supplied for the generated departure candidates.";
-  return { candidates, scoredOutcomes, recommendation, uncertaintyExplanation };
+  // Rank best-first: ascending scoreSeconds, tie-break by earliest departure.
+  const scoredOutcomes = [...matched].sort((a, b) =>
+    a.scoreSeconds - b.scoreSeconds || (a.departureTime < b.departureTime ? -1 : a.departureTime > b.departureTime ? 1 : 0),
+  );
+  const recommendation = scoredOutcomes[0] ?? null;
+  return {
+    candidates,
+    scoredOutcomes,
+    recommendation,
+    uncertaintyExplanation: explainRecommendation(recommendation),
+  };
 }
