@@ -1,0 +1,5 @@
+import_key,cnn,evidence_kind,cycle_nominal_seconds,cycle_min_seconds,cycle_max_seconds,confidence,model_version,rationale,source_url,source_as_of,stale_after
+example-official-2026-001,12345000,official,90,,,high,,Official timing card|Fixed-time plan,https://example.invalid/timing-card/001,2026-01-15,2027-01-15
+example-observed-2026-001,12345000,observed,,82,97,medium,,Observed across multiple complete cycles|Range is not an official setting,https://example.invalid/observation/001,2026-08-01,
+example-modeled-v1-001,12345000,modeled,,75,105,low,downtown-v1,Estimated from documented model inputs|Not an observed or official plan,https://example.invalid/model/v1,2026-08-01,
+

@@ -1,0 +1,2 @@
+import_key,cnn,evidence_kind,cycle_nominal_seconds,cycle_min_seconds,cycle_max_seconds,confidence,model_version,rationale,source_url,source_as_of,stale_after
+sfmta-5th-mission-public-card-2022,24634000,official,90,,,medium,,"Public SFMTA timing card: time-of-day plans, phase sequence, 90-second cycle, and 71-second offset are documented. This record captures the cycle only; phase intervals remain in the source PDF.",https://www.sfmta.com/media/33181/download?inline=,2022-10-20,2023-10-20

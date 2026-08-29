@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "importKey": "sfmta-5th-mission-reviewed-2022",
+  "intersection": {
+    "cnn": "24634000",
+    "name": "5th Street and Mission Street"
+  },
+  "provenance": {
+    "sourceUrl": "https://www.sfmta.com/media/33181/download?inline=",
+    "localFile": "data/raw/sfmta-timing-plans/5th-st-mission-timing-card.pdf",
+    "sourceAsOf": "2022-10-20",
+    "planDate": "2022-10-20",
+    "pageNumbers": [1],
+    "extractionMethod": "manual_review",
+    "reviewedAt": "2026-08-29T00:00:00-07:00",
+    "reviewer": "glossa-review",
+    "notes": [
+      "Reviewed fixture intentionally contains only values verified in the repository research notes.",
+      "Phase intervals are left empty until the PDF card is transcribed by a human reviewer; no OCR-derived values are asserted."
+    ]
+  },
+  "plans": [
+    {
+      "id": "weekday-default",
+      "label": "Weekday/default plan",
+      "days": ["monday", "tuesday", "wednesday", "thursday", "friday"],
+      "startTime": "00:00",
+      "endTime": "24:00",
+      "cycleSeconds": 90,
+      "offsetSeconds": 71,
+      "offsetReference": "documented timing-card reference",
+      "phaseSequence": [],
+      "phaseIntervals": [],
+      "notes": ["Time-of-day label and detailed phase intervals require card transcription."]
+    },
+    {
+      "id": "saturday-default",
+      "label": "Saturday/default plan",
+      "days": ["saturday"],
+      "startTime": "00:00",
+      "endTime": "24:00",
+      "cycleSeconds": 90,
+      "offsetSeconds": 71,
+      "offsetReference": "documented timing-card reference",
+      "phaseSequence": [],
+      "phaseIntervals": [],
+      "notes": ["Plan retained as a reviewed cycle/offset fixture; detailed intervals are not yet transcribed."]
+    },
+    {
+      "id": "sunday-default",
+      "label": "Sunday/default plan",
+      "days": ["sunday"],
+      "startTime": "00:00",
+      "endTime": "24:00",
+      "cycleSeconds": 90,
+      "offsetSeconds": 71,
+      "offsetReference": "documented timing-card reference",
+      "phaseSequence": [],
+      "phaseIntervals": [],
+      "notes": ["Plan retained as a reviewed cycle/offset fixture; detailed intervals are not yet transcribed."]
+    }
+  ],
+  "reviewNotes": [
+    "This JSON is a reviewed structured input for the parser, not an automated PDF extraction.",
+    "The existing timing_estimates table can ingest cycle-level evidence, but not the plan schedule or phase model."
+  ]
+}

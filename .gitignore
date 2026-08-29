@@ -1,0 +1,12 @@
+node_modules/
+.next/
+coverage/
+.env
+.env.local
+.vercel/
+data/raw/
+data/exports/
+public/data/signals.geojson
+public/data/signals.csv
+*.log
+*.tsbuildinfo

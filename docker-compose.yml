@@ -1,0 +1,19 @@
+services:
+  db:
+    image: postgis/postgis:17-3.5
+    environment:
+      POSTGRES_DB: glossa
+      POSTGRES_USER: glossa
+      POSTGRES_PASSWORD: glossa
+    ports:
+      - "5432:5432"
+    volumes:
+      - glossa_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U glossa -d glossa"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  glossa_postgres:
