@@ -1,6 +1,7 @@
 {
   "schemaVersion": 1,
   "importKey": "sfmta-5th-mission-reviewed-2022",
+  "evidenceKind": "official",
   "intersection": {
     "cnn": "24634000",
     "name": "5th Street and Mission Street"
@@ -10,6 +11,7 @@
     "localFile": "data/raw/sfmta-timing-plans/5th-st-mission-timing-card.pdf",
     "sourceAsOf": "2022-10-20",
     "planDate": "2022-10-20",
+    "staleAfter": "2023-10-20",
     "pageNumbers": [1],
     "extractionMethod": "manual_review",
     "reviewedAt": "2026-08-29T00:00:00-07:00",
@@ -62,6 +64,7 @@
   ],
   "reviewNotes": [
     "This JSON is a reviewed structured input for the parser, not an automated PDF extraction.",
-    "The existing timing_estimates table can ingest cycle-level evidence, but not the plan schedule or phase model."
+    "The importer writes this card into the existing timing_estimates table (one row per import_key), preserving the full plan/phase model in raw_record for the signal-delay model.",
+    "Official evidence requires staleAfter; once now passes it, signal_catalog classifies the row stale_official."
   ]
 }

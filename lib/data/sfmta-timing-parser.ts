@@ -1,4 +1,15 @@
+import type { Pool } from "pg";
+import { SnapshotArchive } from "./sources";
+
 export const SFMTA_TIMING_SCHEMA_VERSION = 1 as const;
+
+/**
+ * Evidence classification mirrored from `timing_estimates.evidence_kind` so a
+ * reviewed SFMTA card integrates with the existing freshness model. A reviewed
+ * public SFMTA timing card is official by default, but a reviewer may declare an
+ * observation or modeled estimate instead.
+ */
+export type SfmtaEvidenceKind = "official" | "observed" | "modeled";
 
 export type SfmtaDay =
   | "monday"
@@ -17,6 +28,12 @@ export interface TimingProvenance {
   sourceAsOf: string;
   planDate?: string;
   revisionDate?: string;
+  /**
+   * Freshness cutoff (YYYY-MM-DD). Required for `official` evidence, mirroring
+   * `timing_estimates.CHECK (evidence_kind <> 'official' OR stale_after IS NOT NULL)`.
+   * The derived `TimingKind` becomes `stale_official` once `now` passes this date.
+   */
+  staleAfter?: string;
   pageNumbers: number[];
   extractionMethod: ExtractionMethod;
   reviewedAt: string;
@@ -87,6 +104,12 @@ export interface SfmtaTimeOfDayPlan {
 export interface SfmtaTimingDocument {
   schemaVersion: typeof SFMTA_TIMING_SCHEMA_VERSION;
   importKey: string;
+  evidenceKind: SfmtaEvidenceKind;
+  /**
+   * Required when `evidenceKind` is `modeled` and forbidden otherwise, mirroring
+   * `timing_estimates.CHECK ((evidence_kind = 'modeled') = (model_version IS NOT NULL))`.
+   */
+  modelVersion?: string;
   intersection: {
     cnn: string;
     name: string;
@@ -102,6 +125,7 @@ export interface SfmtaTimingDocument {
 const DAYS = new Set<SfmtaDay>([
   "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
 ]);
+const EVIDENCE_KINDS = new Set<SfmtaEvidenceKind>(["official", "observed", "modeled"]);
 const EXTRACTION_METHODS = new Set<ExtractionMethod>(["manual_review", "structured_source"]);
 const ACTUATION_MODES = new Set<ActuationRules["mode"]>([
   "fixed", "semi_actuated", "fully_actuated", "adaptive", "unknown",
@@ -290,6 +314,7 @@ function parseProvenance(value: unknown): TimingProvenance {
     sourceAsOf: date(raw.sourceAsOf, `${path}.sourceAsOf`),
     planDate: raw.planDate === undefined ? undefined : date(raw.planDate, `${path}.planDate`),
     revisionDate: raw.revisionDate === undefined ? undefined : date(raw.revisionDate, `${path}.revisionDate`),
+    staleAfter: raw.staleAfter === undefined ? undefined : date(raw.staleAfter, `${path}.staleAfter`),
     pageNumbers: pages, extractionMethod, reviewedAt: stringValue(raw.reviewedAt, `${path}.reviewedAt`),
     reviewer: stringValue(raw.reviewer, `${path}.reviewer`), sha256,
     notes: raw.notes === undefined ? undefined : stringArray(raw.notes, `${path}.notes`),
@@ -305,9 +330,15 @@ export function parseSfmtaTimingDocument(input: unknown): SfmtaTimingDocument {
   if (raw.schemaVersion !== SFMTA_TIMING_SCHEMA_VERSION) fail("schemaVersion", `must be ${SFMTA_TIMING_SCHEMA_VERSION}`);
   if (!Array.isArray(raw.plans) || raw.plans.length === 0) fail("plans", "must contain at least one plan");
   const intersection = object(raw.intersection, "intersection");
+  const evidenceKind = raw.evidenceKind === undefined
+    ? "official"
+    : stringValue(raw.evidenceKind, "evidenceKind") as SfmtaEvidenceKind;
+  if (!EVIDENCE_KINDS.has(evidenceKind)) fail("evidenceKind", "must be official, observed, or modeled");
   const document: SfmtaTimingDocument = {
     schemaVersion: SFMTA_TIMING_SCHEMA_VERSION,
     importKey: stringValue(raw.importKey, "importKey"),
+    evidenceKind,
+    modelVersion: optionalString(raw.modelVersion, "modelVersion"),
     intersection: {
       cnn: stringValue(intersection.cnn, "intersection.cnn"), name: stringValue(intersection.name, "intersection.name"),
       system: optionalString(intersection.system, "intersection.system"), master: optionalString(intersection.master, "intersection.master"),
@@ -317,5 +348,181 @@ export function parseSfmtaTimingDocument(input: unknown): SfmtaTimingDocument {
     reviewNotes: raw.reviewNotes === undefined ? undefined : stringArray(raw.reviewNotes, "reviewNotes"),
   };
   if (!/^\d+$/.test(document.intersection.cnn)) fail("intersection.cnn", "must contain digits only");
+  if (document.evidenceKind === "official" && document.provenance.staleAfter === undefined) {
+    fail("provenance.staleAfter", "is required for official evidence");
+  }
+  if (document.evidenceKind === "modeled" && document.modelVersion === undefined) {
+    fail("modelVersion", "is required for modeled evidence");
+  }
+  if (document.evidenceKind !== "modeled" && document.modelVersion !== undefined) {
+    fail("modelVersion", "is only valid for modeled evidence");
+  }
   return document;
+}
+
+export type SfmtaConfidence = "high" | "medium" | "low" | "unknown";
+
+/**
+ * The cycle-level evidence that `importSfmtaTimingDocument` writes into the
+ * existing `timing_estimates` table (migration 001). `cycleNominalSeconds`
+ * holds the shared plan cycle when every plan agrees; otherwise the
+ * `cycleMinSeconds`/`cycleMaxSeconds` range spans the plans, mirroring the
+ * CSV importer's nominal-vs-range semantics and `timing_estimates` CHECKs.
+ * `confidence` is derived from `evidenceKind` — official and observed reviewed
+ * cards are `medium` (matching the existing 5th/Mission public-card row),
+ * modeled cards are `low` — and `modelVersion` is required only for modeled
+ * evidence, mirroring `timing_estimates.CHECK`s.
+ */
+export interface SfmtaTimingEstimateRow {
+  importKey: string;
+  cnn: string;
+  evidenceKind: SfmtaEvidenceKind;
+  cycleNominalSeconds: number | null;
+  cycleMinSeconds: number | null;
+  cycleMaxSeconds: number | null;
+  confidence: SfmtaConfidence;
+  modelVersion: string | null;
+  rationale: string[];
+}
+
+const SFMTA_CONFIDENCE_BY_KIND: Record<SfmtaEvidenceKind, SfmtaConfidence> = {
+  official: "medium",
+  observed: "medium",
+  modeled: "low",
+};
+
+/**
+ * Project a reviewed SFMTA timing document into a `timing_estimates` evidence
+ * row (cycle-level columns + rationale) without touching the database. The
+ * full plan/phase model — offsets, weekday/time-of-day windows, phase green/
+ * yellow/all-red intervals, pedestrian timing, actuation, transit priority,
+ * and preemption — is preserved verbatim in `timing_estimates.raw_record` by
+ * the importer so the signal-delay model can reconstruct every plan. Pure so
+ * it can be unit-tested without a database.
+ */
+export function documentToTimingEstimate(document: SfmtaTimingDocument): SfmtaTimingEstimateRow {
+  const cycles = document.plans.map((plan) => plan.cycleSeconds);
+  const uniqueCycles = new Set(cycles);
+  const cycleNominalSeconds = uniqueCycles.size === 1 ? cycles[0] : null;
+  const cycleMinSeconds = uniqueCycles.size === 1 ? null : Math.min(...cycles);
+  const cycleMaxSeconds = uniqueCycles.size === 1 ? null : Math.max(...cycles);
+  const rationale: string[] = [];
+  if (document.provenance.notes?.length) rationale.push(...document.provenance.notes);
+  if (document.reviewNotes?.length) rationale.push(...document.reviewNotes);
+  if (rationale.length === 0) {
+    rationale.push(
+      `Reviewed SFMTA timing card for ${document.intersection.name} (CNN ${document.intersection.cnn}).`,
+    );
+  }
+  rationale.push(
+    `${document.plans.length} time-of-day plan(s) preserved in raw_record; cycle evidence in cycle_nominal/range columns.`,
+  );
+  return {
+    importKey: document.importKey,
+    cnn: document.intersection.cnn,
+    evidenceKind: document.evidenceKind,
+    cycleNominalSeconds,
+    cycleMinSeconds,
+    cycleMaxSeconds,
+    confidence: SFMTA_CONFIDENCE_BY_KIND[document.evidenceKind],
+    modelVersion: document.modelVersion ?? null,
+    rationale,
+  };
+}
+
+export interface SfmtaTimingImportResult {
+  importKey: string;
+  cnn: string;
+  plans: number;
+  snapshotId: number;
+}
+
+/**
+ * Persist a reviewed SFMTA timing document into the existing `timing_estimates`
+ * table (migration 001) — one row per `import_key` — archiving the reviewed JSON
+ * under the same raw-snapshot policy as network sources. The full plan/phase
+ * model is preserved in `raw_record`; cycle evidence, `source_url`,
+ * `source_as_of`, and the official `stale_after` cutoff land in queryable
+ * columns so `signal_catalog` keeps surfacing cycle evidence and deriving
+ * `current_official`/`stale_official`. Re-importing an `import_key` upserts
+ * the row. Mirrors `importTimingCards` from `./timing-cards`.
+ */
+export async function importSfmtaTimingDocument(
+  pool: Pool,
+  document: SfmtaTimingDocument,
+  archive: SnapshotArchive = new SnapshotArchive(),
+): Promise<SfmtaTimingImportResult> {
+  const sourceKey = "sfmta-timing-cards";
+  const body = JSON.stringify(document, null, 2);
+  const fetchedAt = new Date();
+  const saved = await archive.save(sourceKey, body, fetchedAt, "json");
+  const provenance = document.provenance;
+  const row = documentToTimingEstimate(document);
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const snapshot = await client.query<{ id: string }>(`
+      INSERT INTO source_snapshots (
+        source_key, source_url, fetched_at, source_updated_at, sha256, content_type,
+        byte_count, row_count, archive_path, request, response, retained_until
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,'{}'::jsonb,$11)
+      ON CONFLICT (source_key, sha256) DO UPDATE SET
+        fetched_at = EXCLUDED.fetched_at, source_updated_at = EXCLUDED.source_updated_at,
+        row_count = EXCLUDED.row_count, archive_path = EXCLUDED.archive_path,
+        retained_until = EXCLUDED.retained_until
+      RETURNING id
+    `, [
+      sourceKey,
+      provenance.sourceUrl,
+      fetchedAt.toISOString(),
+      new Date(provenance.sourceAsOf).toISOString(),
+      saved.sha256,
+      "application/json",
+      Buffer.byteLength(body),
+      document.plans.length,
+      saved.path,
+      JSON.stringify({ importKey: document.importKey, reviewer: provenance.reviewer }),
+      new Date(fetchedAt.valueOf() + Number(process.env.RAW_RETENTION_DAYS ?? 90) * 86_400_000).toISOString(),
+    ]);
+    const snapshotId = Number(snapshot.rows[0].id);
+    await client.query(`
+      INSERT INTO timing_estimates (
+        cnn, evidence_kind, cycle_nominal_seconds, cycle_min_seconds,
+        cycle_max_seconds, confidence, model_version, rationale, source_url,
+        source_as_of, stale_after, source_snapshot_id, import_key, raw_record
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb)
+      ON CONFLICT (import_key) DO UPDATE SET
+        cnn = EXCLUDED.cnn, evidence_kind = EXCLUDED.evidence_kind,
+        cycle_nominal_seconds = EXCLUDED.cycle_nominal_seconds,
+        cycle_min_seconds = EXCLUDED.cycle_min_seconds,
+        cycle_max_seconds = EXCLUDED.cycle_max_seconds,
+        confidence = EXCLUDED.confidence, model_version = EXCLUDED.model_version,
+        rationale = EXCLUDED.rationale, source_url = EXCLUDED.source_url,
+        source_as_of = EXCLUDED.source_as_of, stale_after = EXCLUDED.stale_after,
+        source_snapshot_id = EXCLUDED.source_snapshot_id, raw_record = EXCLUDED.raw_record,
+        imported_at = now()
+    `, [
+      row.cnn,
+      row.evidenceKind,
+      row.cycleNominalSeconds,
+      row.cycleMinSeconds,
+      row.cycleMaxSeconds,
+      row.confidence,
+      row.modelVersion,
+      row.rationale,
+      provenance.sourceUrl,
+      new Date(provenance.sourceAsOf).toISOString(),
+      provenance.staleAfter ? new Date(provenance.staleAfter).toISOString() : null,
+      snapshotId,
+      row.importKey,
+      JSON.stringify(document),
+    ]);
+    await client.query("COMMIT");
+    return { importKey: document.importKey, cnn: row.cnn, plans: document.plans.length, snapshotId };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
 }
