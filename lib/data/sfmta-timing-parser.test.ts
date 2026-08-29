@@ -17,7 +17,11 @@ describe("SFMTA reviewed timing-card parser", () => {
 
   it("preserves evidence kind and stale-data status", () => {
     const card = parseSfmtaTimingDocument(reviewedCard);
-    expect(card.evidenceKind).toBe("official");
+    // Reclassified to modeled/unverified-retained: the 90 s cycle and 71 s offset
+    // are not text-extractable from the source PDF, so the card is a retained
+    // placeholder, not official evidence.
+    expect(card.evidenceKind).toBe("modeled");
+    expect(card.modelVersion).toBe("unverified-retained");
     expect(card.provenance.sourceAsOf).toBe("2022-10-20");
     expect(card.provenance.staleAfter).toBe("2023-10-20");
   });
@@ -25,6 +29,8 @@ describe("SFMTA reviewed timing-card parser", () => {
   it("requires staleAfter for official evidence", () => {
     expect(() => parseSfmtaTimingDocument({
       ...reviewedCard,
+      evidenceKind: "official",
+      modelVersion: undefined,
       provenance: { ...reviewedCard.provenance, staleAfter: undefined },
     })).toThrow(/staleAfter/);
   });
@@ -35,9 +41,9 @@ describe("SFMTA reviewed timing-card parser", () => {
   });
 
   it("requires modelVersion for modeled evidence and forbids it otherwise", () => {
-    expect(() => parseSfmtaTimingDocument({ ...reviewedCard, evidenceKind: "modeled" }))
+    expect(() => parseSfmtaTimingDocument({ ...reviewedCard, evidenceKind: "modeled", modelVersion: undefined }))
       .toThrow(/modelVersion.*required for modeled/);
-    expect(() => parseSfmtaTimingDocument({ ...reviewedCard, modelVersion: "v1" }))
+    expect(() => parseSfmtaTimingDocument({ ...reviewedCard, evidenceKind: "official", modelVersion: "v1" }))
       .toThrow(/modelVersion.*only valid for modeled/);
   });
 
@@ -68,13 +74,14 @@ describe("SFMTA reviewed timing-card parser", () => {
     const row = documentToTimingEstimate(parseSfmtaTimingDocument(reviewedCard));
     expect(row.importKey).toBe("sfmta-5th-mission-reviewed-2022");
     expect(row.cnn).toBe("24634000");
-    expect(row.evidenceKind).toBe("official");
+    expect(row.evidenceKind).toBe("modeled");
     // All three plans share the 90-second cycle -> nominal, no range.
     expect(row.cycleNominalSeconds).toBe(90);
     expect(row.cycleMinSeconds).toBeNull();
     expect(row.cycleMaxSeconds).toBeNull();
-    expect(row.confidence).toBe("medium");
-    expect(row.modelVersion).toBeNull();
+    // Modeled evidence derives low confidence and carries the unverified-retained model version.
+    expect(row.confidence).toBe("low");
+    expect(row.modelVersion).toBe("unverified-retained");
     expect(row.rationale.length).toBeGreaterThan(0);
     expect(row.rationale.some((note) => note.includes("time-of-day plan"))).toBe(true);
   });

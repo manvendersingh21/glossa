@@ -5,11 +5,6 @@ import "./route-planner.css";
 import { InfoIcon } from "./icons";
 import type { Confidence, TimingKind } from "@/lib/contracts";
 import { TIMING_COLORS, timingLabel } from "./dashboard-utils";
-import {
-  generateCandidateDepartureTimes,
-  recommendDeparture,
-  type ScoredRouteOutcome,
-} from "@/lib/server/departure-recommendation";
 
 /** Matches the finalized `RouteEstimate` response from /api/v1/route/estimate.
  * Every field below is surfaced in the UI (geometry fields are consumed by the
@@ -28,6 +23,31 @@ interface RouteSignal {
   transitPriority: boolean | null;
 }
 
+/** One ranked departure alternative, bound from the server recommendation. */
+interface RankedAlternative {
+  departureTime: string;
+  scoreSeconds: number;
+  scoreRangeSeconds: [number, number];
+  trafficDelaySeconds: number;
+  signalDelaySeconds: [number, number];
+  likelySignalStops: [number, number];
+  recommended: boolean;
+}
+
+/** Server recommendation (canonical). Honesty floor applied server-side. */
+interface RouteRecommendation {
+  recommendedDepartureTime: string;
+  scoreSeconds: number;
+  scoreRangeSeconds: [number, number];
+  trafficDelaySeconds: number;
+  signalDelaySeconds: [number, number];
+  likelySignalStops: [number, number];
+  confidence: Confidence;
+  explanation: string;
+  rankedAlternatives: RankedAlternative[];
+  candidatesConsidered: number;
+}
+
 interface RouteEstimate {
   route: {
     distanceMeters: number;
@@ -38,30 +58,37 @@ interface RouteEstimate {
   };
   signals: RouteSignal[];
   estimate: {
+    expectedSignalStops?: number;
     likelySignalStops: [number, number];
+    expectedSignalDelaySeconds?: number;
     likelySignalDelaySeconds: [number, number];
-    confidence: "low" | "medium";
+    confidence: Confidence;
     explanation: string;
+    rationale?: string;
+    modeledSignals?: number;
+    unknownSignals?: number;
   };
+  recommendation: RouteRecommendation;
+  /** Recommended departure instant (backwards-compatible). */
   departureTime: string;
 }
 
-/** A ranked departure alternative. The scoring/range fields are bound directly
- * from Agent 4's `ScoredRouteOutcome` (canonical), not recomputed here. */
+/** A ranked departure alternative prepared for display. The scoring/range fields
+ * are bound directly from the server recommendation (no client-side recompute). */
 interface Candidate {
   iso: string;
   label: string;
-  /** Live ETA from Agent 5's route estimate (joined by departureTime). */
-  etaSeconds: number;
-  /** Agent 4: ScoredRouteOutcome.trafficDelaySeconds (live traffic delay). */
+  /** Live ETA from the server route estimate; only the recommended candidate carries one. */
+  etaSeconds: number | undefined;
+  /** Server: trafficDelaySeconds (live traffic delay). */
   trafficDelaySeconds: number;
-  /** Agent 4: ScoredRouteOutcome.modeledSignalDelaySeconds (modeled range). */
+  /** Server: signalDelaySeconds (modeled range). */
   signalDelaySeconds: [number, number];
-  /** Agent 4: ScoredRouteOutcome.likelySignalStops (modeled range, or null). */
+  /** Server: likelySignalStops (modeled range, or null). */
   likelySignalStops: [number, number] | null;
-  /** Agent 4: ScoredRouteOutcome.scoreSeconds (expected total delay). */
+  /** Server: scoreSeconds (expected total delay). */
   scoreSeconds: number;
-  /** Agent 4: ScoredRouteOutcome.scoreRangeSeconds (delay bounds). */
+  /** Server: scoreRangeSeconds (delay bounds). */
   scoreRangeSeconds: [number, number];
   estimate: RouteEstimate | undefined;
   recommended: boolean;
@@ -71,11 +98,11 @@ interface Comparison {
   recommendedLabel: string;
   savingsLabel: string;
   isRecommendationWin: boolean;
-  /** Ranked alternatives (best first), bound from Agent 4's scoredOutcomes. */
+  /** Ranked alternatives (best first), from the server recommendation. */
   candidates: Candidate[];
-  /** Agent 4: recommendDeparture().recommendation (the chosen scored outcome). */
-  recommendedOutcome: ScoredRouteOutcome | null;
-  /** Agent 4: recommendDeparture().uncertaintyExplanation. */
+  /** The server recommendation object. */
+  recommendation: RouteRecommendation;
+  /** Recommendation explanation (honesty + uncertainty narrative). */
   uncertainty: string;
 }
 
@@ -86,9 +113,6 @@ const EXAMPLE_TRIPS: Array<{ from: string; to: string }> = [
   { from: "Mission St & 1st St, San Francisco", to: "Mission St & 16th St, San Francisco" },
   { from: "Oracle Park, San Francisco", to: "Painted Ladies, Steiner St, San Francisco" },
 ];
-
-const COMPARISON_WINDOW_MINUTES = 45;
-const COMPARISON_INTERVAL_MINUTES = 15;
 
 function minutes(seconds: number): string {
   return `${Math.max(1, Math.round(seconds / 60))} min`;
@@ -105,6 +129,12 @@ function miles(meters: number): string {
 
 function clock(iso: string): string {
   return new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit" }).format(new Date(iso));
+}
+
+/** Label for a ranked departure candidate. The earliest candidate (~now) is "Now";
+ * all others show their clock time. compared-to is the earliest candidate's ISO. */
+function candidateLabel(iso: string, earliestIso: string): string {
+  return Math.abs(new Date(iso).getTime() - new Date(earliestIso).getTime()) < 60_000 ? "Now" : clock(iso);
 }
 
 function localDateTimeValue(date: Date): string {
@@ -213,86 +243,60 @@ export function RoutePlanner() {
     setRouteKey({ from, to });
 
     try {
-      const nowDate = new Date();
-      const start = new Date(nowDate.getTime() + 90_000); // ~now, kept strictly future for the API
-      const window = { start: start.toISOString(), durationMinutes: COMPARISON_WINDOW_MINUTES };
-      const candidateIsos = generateCandidateDepartureTimes({
-        now: nowDate,
-        window,
-        intervalMinutes: COMPARISON_INTERVAL_MINUTES,
-      });
-
-      const results = await Promise.allSettled(
-        candidateIsos.map((iso) => fetchEstimate(from, to, iso, controller.signal)),
-      );
+      // A single request lets the server evaluate nearby departure candidates
+      // (capped Google calls) and return the recommendation. The UI consumes the
+      // server recommendation instead of re-issuing one request per candidate,
+      // which would multiply Google Routes calls.
+      const estimate = await fetchEstimate(from, to, undefined, controller.signal);
       if (abortRef.current !== controller) return;
 
-      const succeeded: RouteEstimate[] = [];
-      let firstFailure: string | null = null;
-      results.forEach((result) => {
-        if (result.status === "fulfilled") succeeded.push(result.value);
-        else if (firstFailure === null && result.reason instanceof Error) firstFailure = result.reason.message;
-      });
+      const rec = estimate.recommendation;
+      // Ranked alternatives best-first; the earliest candidate (~now) is the baseline.
+      const ranked = [...rec.rankedAlternatives].sort(
+        (a, b) => a.scoreSeconds - b.scoreSeconds || a.departureTime.localeCompare(b.departureTime),
+      );
+      const earliestIso = [...ranked].sort((a, b) => a.departureTime.localeCompare(b.departureTime))[0]?.departureTime ?? rec.recommendedDepartureTime;
 
-      if (succeeded.length === 0) {
-        setError(firstFailure ?? "The route could not be calculated. Try different addresses.");
-        return;
-      }
-
-      const outcomes = succeeded.map((est) => ({
-        departureTime: est.departureTime,
-        trafficDelaySeconds: Math.max(0, est.route.delaySeconds),
-        modeledSignalDelaySeconds: est.estimate.likelySignalDelaySeconds,
-        likelySignalStops: est.estimate.likelySignalStops,
-      }));
-      const recommendation = recommendDeparture({ now: nowDate, window, intervalMinutes: COMPARISON_INTERVAL_MINUTES, outcomes });
-      const recommendedIso = recommendation.recommendation?.departureTime ?? succeeded[0].departureTime;
-      const estimateByTime = new Map(succeeded.map((est) => [est.departureTime, est]));
-
-      // Ranked alternatives: sort Agent 4's scoredOutcomes by score (best first).
-      // Bind canonical score/range fields directly; ETA is joined from the estimate.
-      const ranked = [...recommendation.scoredOutcomes].sort((a, b) => a.scoreSeconds - b.scoreSeconds);
-      const candidates: Candidate[] = ranked.map((outcome) => {
-        const index = candidateIsos.indexOf(outcome.departureTime);
+      const candidates: Candidate[] = ranked.map((alt) => {
+        const isRecommended = alt.recommended || alt.departureTime === rec.recommendedDepartureTime;
         return {
-          iso: outcome.departureTime,
-          label: index === 0 ? "Now" : clock(outcome.departureTime),
-          etaSeconds: estimateByTime.get(outcome.departureTime)?.route.durationSeconds ?? 0,
-          trafficDelaySeconds: outcome.trafficDelaySeconds,
-          signalDelaySeconds: [outcome.modeledSignalDelaySeconds[0], outcome.modeledSignalDelaySeconds[1]],
-          likelySignalStops: outcome.likelySignalStops
-            ? [outcome.likelySignalStops[0], outcome.likelySignalStops[1]]
-            : null,
-          scoreSeconds: outcome.scoreSeconds,
-          scoreRangeSeconds: [outcome.scoreRangeSeconds[0], outcome.scoreRangeSeconds[1]],
-          estimate: estimateByTime.get(outcome.departureTime),
-          recommended: outcome.departureTime === recommendedIso,
+          iso: alt.departureTime,
+          label: candidateLabel(alt.departureTime, earliestIso),
+          // Only the recommended candidate has a route ETA; others are scored by expected delay.
+          etaSeconds: isRecommended ? estimate.route.durationSeconds : undefined,
+          trafficDelaySeconds: alt.trafficDelaySeconds,
+          signalDelaySeconds: [alt.signalDelaySeconds[0], alt.signalDelaySeconds[1]],
+          likelySignalStops: [alt.likelySignalStops[0], alt.likelySignalStops[1]],
+          scoreSeconds: alt.scoreSeconds,
+          scoreRangeSeconds: [alt.scoreRangeSeconds[0], alt.scoreRangeSeconds[1]],
+          estimate: isRecommended ? estimate : undefined,
+          recommended: isRecommended,
         };
       });
 
-      const baseline = candidates.find((candidate) => candidate.iso === candidateIsos[0]) ?? candidates[0];
+      const baseline = candidates.find((candidate) => candidate.iso === earliestIso) ?? candidates[0];
       const recommended = candidates.find((candidate) => candidate.recommended) ?? baseline;
       const savingsSeconds = Math.max(0, baseline.scoreSeconds - recommended.scoreSeconds);
-      const baselineLabel = baseline.label === "Now" ? "now" : `at ${baseline.label}`;
       const sameAsBaseline = recommended.iso === baseline.iso;
       const recommendedLabel = recommended.label === "Now" ? "Leave now" : `Leave at ${recommended.label}`;
       const savingsLabel = sameAsBaseline
-        ? `Leaving ${baselineLabel} is already your best option`
-        : `About ${Math.max(1, Math.round(savingsSeconds / 60))} min less delay than leaving ${baselineLabel}`;
+        ? "Leaving now is already your best option"
+        : `About ${Math.max(1, Math.round(savingsSeconds / 60))} min less delay than leaving now`;
 
       setComparison({
         recommendedLabel,
         savingsLabel,
         isRecommendationWin: !sameAsBaseline,
         candidates,
-        recommendedOutcome: recommendation.recommendation,
-        uncertainty: recommendation.uncertaintyExplanation,
+        recommendation: rec,
+        uncertainty: rec.explanation,
       });
-      setTrip(recommended.estimate ?? null);
+      setTrip(estimate);
       setDepartureTime(localDateTimeValue(new Date(recommended.iso)));
-    } catch {
+    } catch (requestError) {
       if (abortRef.current !== controller) return;
-      setError("The route could not be calculated. Try again in a moment.");
+      const message = requestError instanceof Error ? requestError.message : "The route could not be calculated.";
+      setError(message);
     } finally {
       if (abortRef.current === controller) setPhase("idle");
     }
@@ -387,7 +391,7 @@ export function RoutePlanner() {
             {phase === "comparing" ? "Comparing departure times…" : phase === "estimating" ? "Calculating…" : "Find best time to leave"}
           </button>
           <p className="rp-primary-help">
-            {"Compares Now, +15, +30 and +45 min and picks the lowest-delay departure."}
+            {"Compares nearby departure times on the server and picks the lowest-delay one. One request — Google calls are capped."}
           </p>
         </div>
 
@@ -442,12 +446,12 @@ function Skeleton() {
 }
 
 function Recommendation({ comparison }: { comparison: Comparison }) {
-  const rec = comparison.recommendedOutcome;
+  const rec = comparison.recommendation;
   return (
     <section className="rp-rec" aria-labelledby="rp-rec-heading">
       <div className="rp-rec-head">
         <div>
-          <p className="rp-rec-kicker">Best time to leave · next {COMPARISON_WINDOW_MINUTES} min</p>
+          <p className="rp-rec-kicker">Best time to leave · {rec.candidatesConsidered} departures compared</p>
           <h3 id="rp-rec-heading" className="rp-rec-time">{comparison.recommendedLabel}</h3>
         </div>
         <span className={`rp-savings ${comparison.isRecommendationWin ? "rp-savings-win" : "rp-savings-flat"}`}>
@@ -458,7 +462,7 @@ function Recommendation({ comparison }: { comparison: Comparison }) {
       {rec ? (
         <dl className="rp-why" aria-label="Why this departure time is recommended">
           <div className="rp-why-row">
-            <dt>Expected delay <span className="rp-why-sub">Agent 4 score</span></dt>
+            <dt>Expected delay <span className="rp-why-sub">expected-delay score</span></dt>
             <dd>
               <strong>{minutes(rec.scoreSeconds)}</strong>
               <span className="rp-why-range">
@@ -478,7 +482,7 @@ function Recommendation({ comparison }: { comparison: Comparison }) {
               <span className="rp-why-chip rp-why-est" aria-label="Estimated">Est.</span>
               Signal delay
             </dt>
-            <dd>{range(rec.modeledSignalDelaySeconds, "second")}</dd>
+            <dd>{range(rec.signalDelaySeconds, "second")}</dd>
           </div>
           <div className="rp-why-row">
             <dt>
@@ -499,7 +503,9 @@ function Recommendation({ comparison }: { comparison: Comparison }) {
               <span className="rp-compare-label">{candidate.label}</span>
             </span>
             <span className="rp-compare-meta">
-              <span className="rp-compare-eta">ETA {minutes(candidate.etaSeconds)}</span>
+              {candidate.etaSeconds !== undefined ? (
+                <span className="rp-compare-eta">ETA {minutes(candidate.etaSeconds)}</span>
+              ) : null}
               <span className="rp-compare-delay">
                 {candidate.scoreSeconds >= 60
                   ? `~${Math.round(candidate.scoreSeconds / 60)} min expected delay`

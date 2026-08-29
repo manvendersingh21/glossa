@@ -1,7 +1,8 @@
 {
   "schemaVersion": 1,
   "importKey": "sfmta-5th-mission-reviewed-2022",
-  "evidenceKind": "official",
+  "evidenceKind": "modeled",
+  "modelVersion": "unverified-retained",
   "intersection": {
     "cnn": "24634000",
     "name": "5th Street and Mission Street"
@@ -18,7 +19,8 @@
     "reviewer": "glossa-review",
     "notes": [
       "Reviewed fixture intentionally contains only values verified in the repository research notes.",
-      "Phase intervals are left empty until the PDF card is transcribed by a human reviewer; no OCR-derived values are asserted."
+      "Phase intervals are left empty until the PDF card is transcribed by a human reviewer; no OCR-derived values are asserted.",
+      "The source URL (media/33181) is the Mary/Mint/Mission new-signal TASC packet; no 90 s cycle or 71 s offset is text-extractable from the PDF. Those values are retained ONLY as placeholders so the import_key reference stays valid; they are NOT asserted as the real controller program, and this row is classified modeled/unverified, not official."
     ]
   },
   "plans": [
@@ -65,6 +67,6 @@
   "reviewNotes": [
     "This JSON is a reviewed structured input for the parser, not an automated PDF extraction.",
     "The importer writes this card into the existing timing_estimates table (one row per import_key), preserving the full plan/phase model in raw_record for the signal-delay model.",
-    "Official evidence requires staleAfter; once now passes it, signal_catalog classifies the row stale_official."
+    "Reclassified from official to modeled/unverified-retained because the 90 s cycle and 71 s offset are not supported by the source PDF; the values are placeholders, not a verified plan. Phase intervals remain empty by design, so the signal model stays cycle-only for this intersection."
   ]
 }
