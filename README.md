@@ -1,3 +1,9 @@
+
+<img width="1461" height="806" alt="Screenshot 2026-08-29 at 5 27 49 PM" src="https://github.com/user-attachments/assets/79174932-c774-4a09-a4a8-932a7d1609f3" />
+<img width="401" height="606" alt="Screenshot 2026-08-29 at 5 27 58 PM" src="https://github.com/user-attachments/assets/cb369b3d-0d59-4d6d-a731-96997f6da3da" />
+<img width="404" height="611" alt="Screenshot 2026-08-29 at 5 28 13 PM" src="https://github.com/user-attachments/assets/f0b18d92-37ea-4e66-9fbc-803d12615f04" />
+<img width="385" height="669" alt="Screenshot 2026-08-29 at 5 28 06 PM" src="https://github.com/user-attachments/assets/416dee82-dc81-4379-8174-27dd2413ff1d" />
+
 # Glossa
 
 Glossa is a reproducible explorer for San Francisco traffic-signal inventory,
