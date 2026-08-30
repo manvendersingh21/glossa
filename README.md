@@ -24,6 +24,14 @@ errors. Operational instructions are in [Deployment](docs/DEPLOYMENT.md).
 ## Local quick start
 
 Prerequisites are Node.js 22+, Docker, and a URL-restricted Mapbox public token.
+## 🧪 Quick Test & Mock Example Trip
+
+Glossa's timing models and signal inventories are highest in density within the downtown core.
+
+To run a mock analysis or test a trip query:
+1. Open [http://localhost:3000](http://localhost:3000) after completing the local quick start.
+2. Select an origin and destination **entirely within Downtown San Francisco** (e.g., *Market & 4th St → Ferry Building / Embarcadero*).
+3. Observe how Glossa maps the C-3 district signal inventory, breaks down signal equipment attributes, and labels timing evidence confidence along the downtown corridor.
 
 ```bash
 cp .env.example .env.local
