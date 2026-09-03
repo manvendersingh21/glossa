@@ -15,6 +15,7 @@ import type {
 import type { FeatureCollection, Point } from "geojson";
 import type { SignalFeature } from "@/lib/contracts";
 import type { Area, LayerMode } from "./dashboard-utils";
+import type { RouteEstimate } from "./route-planner";
 import { TIMING_COLORS, timingLabel } from "./dashboard-utils";
 
 interface SignalMapProps {
@@ -25,6 +26,7 @@ interface SignalMapProps {
   selectedFeature: SignalFeature | null;
   onSelect: (feature: SignalFeature) => void;
   onError: (message: string) => void;
+  route: RouteEstimate | null;
 }
 
 interface MapFeatureProperties {
@@ -34,6 +36,10 @@ interface MapFeatureProperties {
 }
 
 const SOURCE_ID = "signals";
+const ROUTE_LINE_SOURCE_ID = "planned-route-line";
+const ROUTE_POINTS_SOURCE_ID = "planned-route-points";
+const ROUTE_SIGNALS_SOURCE_ID = "planned-route-signals";
+const ROUTE_LAYERS = ["planned-route-casing", "planned-route-line", "planned-route-start", "planned-route-end", "planned-route-signals"];
 const MAP_LAYERS = ["signal-clusters", "signal-cluster-count", "signal-heat", "signal-points", "signal-hit"];
 
 const CAMERA: Record<Area, { center: [number, number]; zoom: number }> = {
@@ -69,6 +75,45 @@ function mapData(features: SignalFeature[]): FeatureCollection<Point, MapFeature
       },
     })),
   };
+}
+
+function decodeRoutePolyline(encoded: string): Array<[number, number]> {
+  const points: Array<[number, number]> = [];
+  let index = 0; let latitude = 0; let longitude = 0;
+  while (index < encoded.length) {
+    let result = 0; let shift = 0; let byte = 0;
+    do { byte = encoded.charCodeAt(index++) - 63; result |= (byte & 0x1f) << shift; shift += 5; } while (byte >= 0x20);
+    latitude += (result & 1) ? ~(result >> 1) : result >> 1;
+    result = 0; shift = 0;
+    do { byte = encoded.charCodeAt(index++) - 63; result |= (byte & 0x1f) << shift; shift += 5; } while (byte >= 0x20);
+    longitude += (result & 1) ? ~(result >> 1) : result >> 1;
+    points.push([longitude / 1e5, latitude / 1e5]);
+  }
+  return points;
+}
+
+function removeRouteData(map: MapboxMap) {
+  for (const layer of ROUTE_LAYERS) if (map.getLayer(layer)) map.removeLayer(layer);
+  for (const source of [ROUTE_LINE_SOURCE_ID, ROUTE_POINTS_SOURCE_ID, ROUTE_SIGNALS_SOURCE_ID]) {
+    if (map.getSource(source)) map.removeSource(source);
+  }
+}
+
+function addRouteData(map: MapboxMap, route: RouteEstimate | null, mapboxgl: typeof import("mapbox-gl")["default"]) {
+  removeRouteData(map);
+  if (!route) return;
+  const coordinates = decodeRoutePolyline(route.route.encodedPolyline);
+  if (coordinates.length < 2) return;
+  map.addSource(ROUTE_LINE_SOURCE_ID, { type: "geojson", data: { type: "Feature", properties: {}, geometry: { type: "LineString", coordinates } } });
+  map.addSource(ROUTE_POINTS_SOURCE_ID, { type: "geojson", data: { type: "FeatureCollection", features: [{ type: "Feature", properties: { kind: "start" }, geometry: { type: "Point", coordinates: coordinates[0] } }, { type: "Feature", properties: { kind: "end" }, geometry: { type: "Point", coordinates: coordinates[coordinates.length - 1] } }] } });
+  map.addSource(ROUTE_SIGNALS_SOURCE_ID, { type: "geojson", data: { type: "FeatureCollection", features: route.signals.map((signal, index) => ({ type: "Feature", properties: { index: index + 1 }, geometry: { type: "Point", coordinates: signal.coordinates } })) } });
+  map.addLayer({ id: "planned-route-casing", type: "line", source: ROUTE_LINE_SOURCE_ID, paint: { "line-color": "#ffffff", "line-width": 9, "line-opacity": 0.92 } });
+  map.addLayer({ id: "planned-route-line", type: "line", source: ROUTE_LINE_SOURCE_ID, paint: { "line-color": "#087f72", "line-width": 5, "line-opacity": 0.95 } });
+  map.addLayer({ id: "planned-route-start", type: "circle", source: ROUTE_POINTS_SOURCE_ID, filter: ["==", ["get", "kind"], "start"], paint: { "circle-color": "#173b3c", "circle-radius": 8, "circle-stroke-color": "#ffffff", "circle-stroke-width": 3 } });
+  map.addLayer({ id: "planned-route-end", type: "circle", source: ROUTE_POINTS_SOURCE_ID, filter: ["==", ["get", "kind"], "end"], paint: { "circle-color": "#d36b45", "circle-radius": 8, "circle-stroke-color": "#ffffff", "circle-stroke-width": 3 } });
+  map.addLayer({ id: "planned-route-signals", type: "circle", source: ROUTE_SIGNALS_SOURCE_ID, paint: { "circle-color": "#f2b84b", "circle-radius": 5, "circle-stroke-color": "#173b3c", "circle-stroke-width": 2 } });
+  const bounds = coordinates.reduce((result, coordinate) => result.extend(coordinate), new mapboxgl.LngLatBounds(coordinates[0], coordinates[0]));
+  map.fitBounds(bounds, { padding: 72, maxZoom: 15.5, duration: 700 });
 }
 
 function removeDataLayers(map: MapboxMap) {
@@ -206,6 +251,7 @@ export function SignalMap({
   selectedFeature,
   onSelect,
   onError,
+  route,
 }: SignalMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapboxMap | null>(null);
@@ -332,6 +378,13 @@ export function SignalMap({
     if (!map || !mapReady) return;
     addMapData(map, mode, features);
   }, [features, mapReady, mode]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    const mapboxgl = mapboxRef.current;
+    if (!map || !mapboxgl || !mapReady) return;
+    addRouteData(map, route, mapboxgl);
+  }, [mapReady, route]);
 
   useEffect(() => {
     const map = mapRef.current;

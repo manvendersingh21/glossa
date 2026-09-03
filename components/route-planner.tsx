@@ -48,7 +48,7 @@ interface RouteRecommendation {
   candidatesConsidered: number;
 }
 
-interface RouteEstimate {
+export interface RouteEstimate {
   route: {
     distanceMeters: number;
     durationSeconds: number;
@@ -174,7 +174,7 @@ async function fetchEstimate(
   return body as RouteEstimate;
 }
 
-export function RoutePlanner() {
+export function RoutePlanner({ onRouteChange }: { onRouteChange?: (route: RouteEstimate | null) => void }) {
   const [origin, setOrigin] = useState("");
   const [destination, setDestination] = useState("");
   const [departureTime, setDepartureTime] = useState("");
@@ -193,6 +193,7 @@ export function RoutePlanner() {
     setExampleIndex((index) => index + 1);
     setError(null);
     setTrip(null);
+    onRouteChange?.(null);
     setComparison(null);
     setRouteKey({ from: "", to: "" });
   }
@@ -239,6 +240,7 @@ export function RoutePlanner() {
     setPhase("comparing");
     setError(null);
     setTrip(null);
+    onRouteChange?.(null);
     setComparison(null);
     setRouteKey({ from, to });
 
@@ -292,6 +294,7 @@ export function RoutePlanner() {
         uncertainty: rec.explanation,
       });
       setTrip(estimate);
+      onRouteChange?.(estimate);
       setDepartureTime(localDateTimeValue(new Date(recommended.iso)));
     } catch (requestError) {
       if (abortRef.current !== controller) return;
@@ -318,6 +321,7 @@ export function RoutePlanner() {
     setPhase("estimating");
     setError(null);
     setTrip(null);
+    onRouteChange?.(null);
     setComparison(null);
     setRouteKey({ from, to });
 
@@ -326,6 +330,7 @@ export function RoutePlanner() {
       const estimate = await fetchEstimate(from, to, iso, controller.signal);
       if (abortRef.current !== controller) return;
       setTrip(estimate);
+      onRouteChange?.(estimate);
       setDepartureTime(localDateTimeValue(new Date(estimate.departureTime)));
     } catch (requestError) {
       if (abortRef.current !== controller) return;

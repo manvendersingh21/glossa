@@ -238,7 +238,8 @@ async function loadDowntown(
     UPDATE intersections i
     SET downtown = EXISTS (
       SELECT 1 FROM downtown_areas a
-      WHERE a.id = 'sf_c3_union' AND ST_Covers(a.geometry, i.geometry)
+      WHERE a.id = 'sf_c3_union'
+        AND ST_DWithin(a.geometry::geography, i.geometry::geography, 40)
     )
   `);
 }

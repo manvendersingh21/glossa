@@ -673,6 +673,26 @@ a {
   color: white;
 }
 
+.route-map-key {
+  position: absolute;
+  left: 18px;
+  bottom: 18px;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 254, 249, .94);
+  box-shadow: 0 5px 18px rgba(23, 59, 60, .1);
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-weight: 700;
+}
+.route-map-key-line { width: 20px; height: 4px; border-radius: 99px; background: var(--teal); }
+.route-map-key-dot { width: 8px; height: 8px; border: 2px solid var(--ink); border-radius: 50%; background: #f2b84b; }
+
 .map-key {
   position: absolute;
   z-index: 6;

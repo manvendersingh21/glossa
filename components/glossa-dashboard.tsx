@@ -39,7 +39,7 @@ import {
   SignalIcon,
 } from "./icons";
 import { SignalMap } from "./signal-map";
-import { RoutePlanner } from "./route-planner";
+import { RoutePlanner, type RouteEstimate } from "./route-planner";
 
 const INITIAL_TIMING_FILTERS = new Set<TimingFilter>([
   "official",
@@ -83,6 +83,16 @@ export function GlossaDashboard() {
   const [statsError, setStatsError] = useState(false);
   const [mapError, setMapError] = useState<string | null>(null);
   const [retryKey, setRetryKey] = useState(0);
+  const [route, setRoute] = useState<RouteEstimate | null>(null);
+
+  const handleRouteChange = useCallback((nextRoute: RouteEstimate | null) => {
+    setRoute(nextRoute);
+    if (nextRoute) {
+      window.requestAnimationFrame(() => {
+        document.getElementById("main-map")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      });
+    }
+  }, []);
 
   const mapboxToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN ?? "";
   const mapConfigured = Boolean(
@@ -331,7 +341,7 @@ export function GlossaDashboard() {
             </fieldset>
           </section>
 
-          <RoutePlanner />
+          <RoutePlanner onRouteChange={handleRouteChange} />
 
           <SourceSummary collection={collection} loading={loading} />
         </aside>
@@ -369,6 +379,7 @@ export function GlossaDashboard() {
               selectedFeature={visibleSelected}
               onSelect={setSelected}
               onError={(message) => setMapError(message)}
+              route={route}
             />
           ) : (
             <MapFallback
@@ -410,6 +421,15 @@ export function GlossaDashboard() {
               features={filteredSignals}
               onSelect={setSelected}
             />
+          ) : null}
+
+          {route ? (
+            <div className="route-map-key" aria-label="Planned route legend">
+              <span className="route-map-key-line" aria-hidden="true" />
+              <span>route displayed</span>
+              <span className="route-map-key-dot" aria-hidden="true" />
+              <span>{route.signals.length} signal stops</span>
+            </div>
           ) : null}
 
           <div className="map-key" aria-label={`${filteredSignals.length} filtered results`}>
